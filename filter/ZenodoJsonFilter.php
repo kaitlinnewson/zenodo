@@ -74,10 +74,10 @@ class ZenodoJsonFilter extends PKPImportExportFilter
         $plugin = $deployment->getPlugin();
         $cache = $plugin->getCache();
 
-        if (is_a($pubObject, 'Submission')) {
+        if ($pubObject instanceof Submission) {
             $publication = $pubObject->getCurrentPublication();
             $submissionId = $pubObject->getId();
-        } elseif (is_a($pubObject, 'Publication')) {
+        } elseif ($pubObject instanceof Publication) {
             $publication = $pubObject; /** @var Publication $publication */
             $submissionId = $pubObject->getData('submissionId');
         } else {

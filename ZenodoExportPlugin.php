@@ -70,6 +70,16 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
     }
 
     /**
+     * @copydoc Plugin::getEncryptedSettingFields()
+     */
+    public function getEncryptedSettingFields(): array
+    {
+        return [
+            'apiKey',
+        ];
+    }
+
+    /**
      * @copydoc ImportExportPlugin::display()
      * @throws Exception
      */
