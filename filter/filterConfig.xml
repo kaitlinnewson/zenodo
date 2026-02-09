@@ -17,14 +17,14 @@
 			symbolic="article=>zenodo-json"
 			displayName="plugins.importexport.zenodo.displayName"
 			description="plugins.importexport.zenodo.description"
-			inputType="class::classes.submission.Submission"
+			inputType="class::APP\submission\Submission"
 			outputType="primitive::string" />
 		<!-- Zenodo JSON publication output -->
 		<filterGroup
 			symbolic="publication=>zenodo-json"
 			displayName="plugins.importexport.zenodo.displayName"
 			description="plugins.importexport.zenodo.description"
-			inputType="class::classes.publication.Publication"
+			inputType="class::APP\publication\Publication"
 			outputType="primitive::string" />
 	</filterGroups>
 	<filters>
