@@ -28,8 +28,6 @@ use APP\publication\Publication;
 use APP\submission\Submission;
 use Carbon\Carbon;
 use Exception;
-use GuzzleHttp\Exception\GuzzleException;
-use Illuminate\Support\Facades\DB;
 use PKP\affiliation\Affiliation;
 use PKP\citation\Citation;
 use PKP\context\Context;
@@ -38,7 +36,6 @@ use PKP\filter\FilterGroup;
 use PKP\galley\Galley;
 use PKP\i18n\LocaleConversion;
 use PKP\plugins\importexport\PKPImportExportFilter;
-use PKP\plugins\PluginRegistry;
 use PKP\submission\PKPSubmission;
 
 class ZenodoJsonFilter extends PKPImportExportFilter
@@ -324,7 +321,7 @@ class ZenodoJsonFilter extends PKPImportExportFilter
         }
 
         // Funding metadata
-        $fundingMetadata = $this->getFundingData($submissionId, $context);
+        $fundingMetadata = $this->getFundingData($publication, $context);
         if ($fundingMetadata) {
             $article['metadata']['funding'] = $fundingMetadata;
         }
@@ -505,16 +502,12 @@ class ZenodoJsonFilter extends PKPImportExportFilter
     /**
      * Helper function for funding metadata
      */
-    private function getFundingData(int $submissionId, Context $context): false|array
+    private function getFundingData(Publication $publication, Context $context): false|array
     {
         /** @var ZenodoExportDeployment $deployment */
         $deployment = $this->getDeployment();
         /** @var ZenodoExportPlugin $plugin */
         $plugin = $deployment->getPlugin();
-
-        if (!PluginRegistry::getPlugin('generic', 'FundingPlugin')) {
-            return false;
-        }
 
         // @todo look into COST Action from example
 
@@ -524,66 +517,44 @@ class ZenodoJsonFilter extends PKPImportExportFilter
         //    "funder": {"id": "00k4n6c32"}
         //   },
 
-        $funderIds = DB::table('funders')
-            ->where('submission_id', $submissionId)
-            ->pluck('funder_identification', 'funder_id');
+        $funders = $publication->getData('funders');
+        $locale = $publication->getData('locale');
+        $fundingData = [];
 
-        if (!$funderIds->isEmpty()) {
-            foreach ($funderIds as $funderId => $funderIdentification) {
-                if ($funderRor = $this->getFunderROR($funderIdentification)) {
-                    $awardIds = DB::table('funder_awards')
-                        ->where('funder_id', $funderId)
-                        ->pluck('funder_award_number');
+        foreach ($funders as $funder) {
+            $ror = !empty($funder->ror) ? basename(parse_url($funder->ror, PHP_URL_PATH)) : null;
+            $funderField = $ror ? ['id' => $ror] : ['name' => $funder->getLocalizedData('name', $locale)];
+            $grants = $funder->grants ?? [];
 
-                    foreach ($awardIds as $awardId) {
-                        if ($plugin->isValidAward($context, $funderRor, $awardId) === true) {
-                            $fundData[] = [
-                                'award' => [
-                                    'id' => $funderRor . '::' . $awardId,
-                                ],
-                                'funder' => [
-                                    'id' => $funderRor,
-                                ]
-                            ];
+            if (!empty($grants)) {
+                foreach ($grants as $grant) {
+                    $entry = ['funder' => $funderField];
+                    $award = [];
+
+                    if ($ror && !empty($grant['grantNumber']) && $plugin->isValidAward($context, $ror, $grant['grantNumber']) === true) {
+                        $award['id'] = $ror . '::' . $grant['grantNumber'];
+                    } else {
+                        if (!empty($grant['grantDoi'])) {
+                            $award['identifiers'] = [['scheme' => 'doi', 'identifier' => $grant['grantDoi']]];
+                        }
+                        if (!empty($grant['grantNumber']) && !empty($grant['grantName'])) {
+                            $award['number'] = $grant['grantNumber'];
+                            $award['title'] = [LocaleConversion::getIso1FromLocale($locale) => $grant['grantName']];
                         }
                     }
+
+                    if (!empty($award)) {
+                        $entry['award'] = $award;
+                    }
+
+                    $fundingData[] = $entry;
                 }
+            } else {
+                $fundingData[] = ['funder' => $funderField];
             }
         }
-        return $fundData ?? false;
-    }
 
-    /**
-     * Find the funder ROR ID from the Crossref funder ID.
-     * To be removed once the funding plugin has migrated to ROR.
-     * e.g. https://api.ror.org/v2/organizations?query=%22501100002341%22
-     */
-    private function getFunderROR(string $funderIdentification): string|bool
-    {
-        $apiUrl = 'https://api.ror.org/v2/organizations';
-        $funderId = str_replace('https://doi.org/10.13039/', '', $funderIdentification);
-        $queryUrl = $apiUrl . '?query=%22' . $funderId . '%22';
-        $httpClient = Application::get()->getHttpClient();
-
-        try {
-            $rorResponse = $httpClient->request('GET', $queryUrl);
-            $body = json_decode($rorResponse->getBody(), true);
-
-            if (
-                $body['number_of_results'] == 1
-                && preg_match('/^https:\/\/ror\.org\/(.*)$/', $body['items'][0]['id'], $matches)
-            ) {
-                $rorId = $matches[1];
-            }
-
-            return $rorId ?? false;
-        } catch (GuzzleException | Exception $e) {
-            $returnMessage = $e->hasResponse()
-                ? $e->getResponse()->getBody() . ' (' . $e->getResponse()->getStatusCode() . ' ' . $e->getResponse()->getReasonPhrase() . ')'
-                : $e->getMessage();
-            error_log(__('plugins.importexport.ror.api.error.awardError', ['param' => $returnMessage]));
-            return false;
-        }
+        return $fundingData ?: false;
     }
 
     /**
