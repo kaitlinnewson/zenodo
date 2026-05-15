@@ -317,7 +317,7 @@ class ZenodoJsonFilter extends PKPImportExportFilter
             $subjectMetadata = [];
             foreach ($keywordsSubjects as $subject) {
                 $subjectMetadata[] = [
-                    'subject' => $subject,
+                    'subject' => $subject['name'],
                 ];
             }
             $article['metadata']['subjects'] = $subjectMetadata;
