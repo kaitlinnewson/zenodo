@@ -17,7 +17,6 @@ Compatible with OJS 3.6 and later.
   - Enter the API key from your sandbox account
   - Enable test mode
   - If you don't have DOIs set up for your publications, enable Zenodo DOIs
-- To test funding metadata, [the funding metadata plugin](https://github.com/ajnyga/funding) must be installed and enabled.
 
 ## Zenodo API
 
@@ -49,12 +48,9 @@ This allows users to review the accuracy of the record or add additional metadat
 a setting for automatic publishing, but it's important to note that a record in Zenodo
 **can't easily be deleted once it has been published** (metadata can be updated for the record).
 
-### Funding Metadata
+### Funder Metadata
 
-If the [funding metadata plugin](https://github.com/ajnyga/funding) is installed and enabled, the plugin will
-attempt to add funding metadata to the exported record. Only funding metadata which is supported by Zenodo will be
-included in the exported record. The ROR API is used to look up ROR IDs for funders, as the
-funding plugin currently uses DOIs for funders.
+If the Funder metadata is enabled, the plugin will add funding metadata to the exported record.
 
 ### Embargoes and Restricted Data
 

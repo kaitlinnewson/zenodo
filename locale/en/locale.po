@@ -129,9 +129,6 @@ msgstr "Creating the draft from the published record was not successful! The Zen
 msgid "plugins.importexport.zenodo.api.error.isPublished"
 msgstr "This record has been published in Zenodo and can not be updated."
 
-msgid "plugins.importexport.ror.api.error.awardError"
-msgstr "The ROR funder lookup was not successful! The ROR API returned an error: '{$param}'."
-
 msgid "plugins.importexport.zenodo.cliUsage"
 msgstr ""
 "Usage:\n"
