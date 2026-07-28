@@ -3,8 +3,8 @@
 /**
  * @file plugins/generic/zenodo/ZenodoInfoSender.php
  *
- * Copyright (c) 2025 Simon Fraser University
- * Copyright (c) 2025 John Willinsky
+ * Copyright (c) 2025-2026 Simon Fraser University
+ * Copyright (c) 2025-2026 John Willinsky
  * Distributed under the GNU GPL v3. For full terms see the file docs/COPYING.
  *
  * @class ZenodoInfoSender
@@ -68,8 +68,6 @@ class ZenodoInfoSender extends ScheduledTask
         $journals = $this->getJournals();
 
         foreach ($journals as $journal) {
-            // load pubIds for this journal
-            PluginRegistry::loadCategory('pubIds', true, $journal->getId());
             if ($journal->getData(Context::SETTING_DOI_VERSIONING)) {
                 $depositablePublications = $plugin->getAllDepositablePublications($journal);
                 if (count($depositablePublications)) {
@@ -96,13 +94,16 @@ class ZenodoInfoSender extends ScheduledTask
     protected function getJournals(): array
     {
         $plugin = $this->plugin;
+        PluginRegistry::loadCategory('generic');
+        $genericPlugin = PluginRegistry::getPlugin('generic', 'zenodoplugin');
         $contextDao = Application::getContextDAO();
         $journalFactory = $contextDao->getAll(true);
 
         $journals = [];
-        while ($journal = $journalFactory->next()) { /** @var  Journal $journal */
+        while ($journal = $journalFactory->next()) { /** @var Journal $journal */
             $journalId = $journal->getId();
             if (
+                ($genericPlugin && !$genericPlugin->getEnabled($journalId)) ||
                 !$plugin->getSetting($journalId, 'apiKey') ||
                 !$plugin->getSetting($journalId, 'automaticRegistration')
             ) {
@@ -141,9 +142,9 @@ class ZenodoInfoSender extends ScheduledTask
     protected function addLogEntry(array $errors): void
     {
         foreach ($errors as $error) {
-            if (!is_array($error) || !count($error) > 0) {
+            if (!is_array($error) || count($error) < 1) {
                 throw new Exception('Invalid error message');
-            };
+            }
             $this->addExecutionLogEntry(
                 __($error[0], ['param' => $error[1] ?? null]),
                 ScheduledTaskHelper::SCHEDULED_TASK_MESSAGE_TYPE_WARNING
