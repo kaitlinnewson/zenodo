@@ -33,6 +33,7 @@ use PKP\galley\Galley;
 use PKP\notification\Notification;
 use PKP\plugins\interfaces\HasTaskScheduler;
 use PKP\scheduledTask\PKPScheduler;
+use PKP\submissionFile\SubmissionFile;
 use Throwable;
 
 class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskScheduler
@@ -558,17 +559,20 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
 
         $publication = $object instanceof Publication ? $object : $object->getCurrentPublication();
         $pubLocale = $publication->getData('locale');
+        $usedKeys = [];
 
-        foreach ($publication->getData('galleys') as $galley) { /** @var Galley $galley */
-            $submissionFile = $galley->getData('submissionFileId')
-                ? Repo::submissionFile()->get($galley->getData('submissionFileId'))
-                : null;
-            if (!$submissionFile) {
-                continue;
+        foreach ($this->getDepositableGalleys($publication) as $galleyId => $submissionFile) {
+            // File keys must be unique within the record; slashes would be read as a path.
+            $fileName = $submissionFile->getLocalizedData('name', $pubLocale)
+                ?: basename($fileService->get($submissionFile->getData('fileId'))->path);
+            $fileName = str_replace('/', '_', $fileName);
+            if (in_array($fileName, $usedKeys)) {
+                $fileName = $galleyId . '_' . $fileName;
             }
+            $usedKeys[] = $fileName;
+            $encodedFileName = rawurlencode($fileName);
 
             // Initialize the file upload
-            $fileName = $submissionFile->getData('name', $pubLocale);
             try {
                 $httpClient->request(
                     'POST',
@@ -591,7 +595,7 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
 
             // Upload the file contents
             $filePath = $filesDir . '/' . $fileService->get($submissionFile->getData('fileId'))->path;
-            $filesFileUrl = $url . '/' . $zenodoId . '/draft/files/' . $fileName . '/content';
+            $filesFileUrl = $url . '/' . $zenodoId . '/draft/files/' . $encodedFileName . '/content';
             $fileHeaders = [
                 'Content-Type' => 'application/octet-stream',
                 'Authorization' => 'Bearer ' . $apiKey,
@@ -612,7 +616,7 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
             }
 
             // Commit the file upload
-            $filesCommitUrl = $url . '/' . $zenodoId . '/draft/files/' . $fileName . '/commit';
+            $filesCommitUrl = $url . '/' . $zenodoId . '/draft/files/' . $encodedFileName . '/commit';
             $commitHeaders = [
                 'Authorization' => 'Bearer ' . $apiKey,
             ];
@@ -635,6 +639,25 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
         return true;
     }
 
+    /**
+     * Get the galley files that can be deposited, keyed by galley ID.
+     * Galleys without a submission file (e.g. remote galleys) are skipped.
+     *
+     * @return array<int, SubmissionFile>
+     */
+    public function getDepositableGalleys(Publication $publication): array
+    {
+        $files = [];
+        foreach ($publication->getData('galleys') ?? [] as $galley) { /** @var Galley $galley */
+            $submissionFile = $galley->getData('submissionFileId')
+                ? Repo::submissionFile()->get($galley->getData('submissionFileId'))
+                : null;
+            if ($submissionFile) {
+                $files[$galley->getId()] = $submissionFile;
+            }
+        }
+        return $files;
+    }
 
     /**
      * Build an error message from an HTTP client exception, including the response when there is one.
