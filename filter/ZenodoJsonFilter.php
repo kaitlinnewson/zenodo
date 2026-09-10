@@ -24,6 +24,7 @@ use APP\issue\Issue;
 use APP\journal\Journal;
 use APP\plugins\generic\zenodo\ZenodoExportDeployment;
 use APP\plugins\generic\zenodo\ZenodoExportPlugin;
+use APP\publication\enums\VersionStage;
 use APP\publication\Publication;
 use APP\submission\Submission;
 use Carbon\Carbon;
@@ -186,16 +187,31 @@ class ZenodoJsonFilter extends PKPImportExportFilter
             $article['metadata']['title'] = $publication->getLocalizedTitle($publicationLocale);
         }
 
+        // Subtitle and translated titles
+        $additionalTitles = $this->getAdditionalTitlesData($publication, $publicationLocale);
+        if (!empty($additionalTitles)) {
+            $article['metadata']['additional_titles'] = $additionalTitles;
+        }
+
         // Authors: name, affiliations and ORCID
         if ($publication->getData('authors')->isNotEmpty()) {
             $authorsData = $this->getAuthorsData($publication, $publicationLocale);
             $article['metadata']['creators'] = $authorsData;
         }
 
-        // Abstract
+        // Abstract (InvenioRDM accepts sanitized HTML) and translated abstracts
         $abstract = $publication->getData('abstract', $publicationLocale);
         if (!empty($abstract)) {
-            $article['metadata']['description'] = PKPString::html2text($abstract);
+            $article['metadata']['description'] = PKPString::stripUnsafeHtml($abstract);
+        }
+        foreach ($publication->getData('abstract') ?? [] as $locale => $localizedAbstract) {
+            if ($locale == $publicationLocale || !$this->isValidText($localizedAbstract)) {
+                continue;
+            }
+            $article['metadata']['additional_descriptions'][] = $this->withLanguage([
+                'description' => PKPString::stripUnsafeHtml($localizedAbstract),
+                'type' => ['id' => 'abstract'],
+            ], $locale);
         }
 
         // Publication date
@@ -209,9 +225,10 @@ class ZenodoJsonFilter extends PKPImportExportFilter
             )->format('Y-m-d');
         }
 
-        // Publisher name
-        if (!empty($context->getData('publisherInstitution'))) {
-            $article['metadata']['publisher'] = $context->getData('publisherInstitution');
+        // Publisher name, falling back to the journal name
+        $publisher = $context->getData('publisherInstitution') ?: $context->getName($context->getPrimaryLocale());
+        if (!empty($publisher)) {
+            $article['metadata']['publisher'] = $publisher;
         }
 
         // References
@@ -273,7 +290,6 @@ class ZenodoJsonFilter extends PKPImportExportFilter
             'ISSN' => 'issn',
             'ISBN' => 'isbn',
             'PMID' => 'pmid',
-            'PMCID' => 'pubmedcentral',
             'URI' => 'url',
         ];
         foreach ($publication->getData('dataCitations') ?? [] as $dataCitation) { /** @var DataCitation $dataCitation */
@@ -363,6 +379,18 @@ class ZenodoJsonFilter extends PKPImportExportFilter
             ];
         }
 
+        // Issue relation
+        if ($issue?->getDoi()) {
+            $article['metadata']['related_identifiers'][] = [
+                'identifier' => $issue->getDoi(),
+                'relation_type' => [
+                    'id' => 'ispartof'
+                ],
+                'scheme' => 'doi',
+                'resource_type' => $this->resourceType('publication-journal'),
+            ];
+        }
+
         // Review relations
         $reviewItems = Repo::publication()->getReviewDoiItemsGroupedByPublication([$publication->getId()]);
         foreach ($reviewItems[$publication->getId()] ?? [] as $reviewItem) {
@@ -382,36 +410,32 @@ class ZenodoJsonFilter extends PKPImportExportFilter
             }
         }
 
-        // Version relations
-        if ($doiVersioning) {
-            $previousPublications = Repo::publication()->getCollector()
-                ->filterBySubmissionIds([$publication->getData('submissionId')])
-                ->filterByVersionStage($publication->getData('versionStage'))
-                ->filterByStatus([PKPSubmission::STATUS_PUBLISHED])
-                ->getMany();
-
-            if (!$previousPublications->isEmpty()) {
-                $previousDois = [];
-                foreach ($previousPublications as $previousPublication) { /** @var Publication $previousPublication */
-                    if (
-                        ((int)$previousPublication->getData('versionMajor')
-                        < (int)$publication->getData('versionMajor'))
-                        && $previousPublication->getDoi()
-                    ) {
-                        $previousDois[] = $previousPublication->getDoi();
-                    }
-                }
-
-                foreach (array_unique($previousDois) as $previousDoi) {
-                    $article['metadata']['related_identifiers'][] = [
-                        'relation_type' => [
-                            'id' => 'isversionof'
-                        ],
-                        'identifier' => $previousDoi,
-                        'scheme' => 'doi',
-                        'resource_type' => $this->resourceType('publication-article'),
-                    ];
-                }
+        // Version relation: link the immediately preceding published version (any stage),
+        // using the DataCite isNewVersionOf model shared with the JATS, DC and MARC exports.
+        if ($doiVersioning && $submission) {
+            $versionRelation = Repo::publication()->getVersionRelation($publication, $submission, $context);
+            if ($versionRelation) {
+                $versionIdentifier = $versionRelation->doi ?: $request->getDispatcher()->url(
+                    $request,
+                    Application::ROUTE_PAGE,
+                    $context->getPath(),
+                    'article',
+                    'view',
+                    [$submission->getBestId(), 'version', $versionRelation->publicationId],
+                    urlLocaleForPage: ''
+                );
+                $article['metadata']['related_identifiers'][] = [
+                    'identifier' => $versionIdentifier,
+                    'relation_type' => [
+                        'id' => strtolower($versionRelation->relationType->value)
+                    ],
+                    'scheme' => $versionRelation->doi ? 'doi' : 'url',
+                    'resource_type' => $this->resourceType(
+                        $versionRelation->versionStage === VersionStage::AUTHOR_ORIGINAL->value
+                            ? 'publication-preprint'
+                            : 'publication-article'
+                    ),
+                ];
             }
         }
 
@@ -461,32 +485,35 @@ class ZenodoJsonFilter extends PKPImportExportFilter
         }
 
         // License
-        $licenseUrl = $publication->getData('licenseUrl') ?? $context->getData('licenseUrl') ?? '';
-        if (preg_match('/creativecommons\.org\/licenses\/(.*?)\/([\d.]+)\/?$/i', $licenseUrl, $match)) {
-            $article['metadata']['rights'][] = [
-                'id' => 'cc-' . $match[1] . '-' . $match[2],
-            ];
+        $licenseUrl = $publication->getData('licenseUrl') ?: $context->getData('licenseUrl') ?: '';
+        $rights = $this->getRightsData($licenseUrl);
+        if ($rights) {
+            $article['metadata']['rights'][] = $rights;
         }
 
         // Dates
         // https://inveniordm.docs.cern.ch/reference/metadata/#dates-0-n
+        $acceptDecisions = [Decision::ACCEPT, Decision::SKIP_EXTERNAL_REVIEW];
         $editorDecision = Repo::decision()->getCollector()
             ->filterBySubmissionIds([$submissionId])
             ->getMany()
-            ->first(fn (Decision $decision, $key) => $decision->getData('decision') === Decision::ACCEPT);
+            ->first(fn (Decision $decision, $key) => in_array($decision->getData('decision'), $acceptDecisions));
 
+        $dates = [];
+        if ($submission?->getData('dateSubmitted')) {
+            $dates[] = $this->dateEntry($submission->getData('dateSubmitted'), 'submitted', 'Submission date');
+        }
         if ($editorDecision) {
-            $decisionDate = Carbon::parse($editorDecision->getData('dateDecided'));
-            $article['metadata']['dates'][] = [
-                'date' => $decisionDate->format('Y-m-d'),
-                'type' => [
-                    'id' => 'accepted',
-                    'title' => [
-                        'en' => 'Accepted',
-                    ]
-                ],
-                'description' => 'Acceptance date',
-            ];
+            $dates[] = $this->dateEntry($editorDecision->getData('dateDecided'), 'accepted', 'Acceptance date');
+        }
+        if ($publication->getData('lastModified')) {
+            $dates[] = $this->dateEntry($publication->getData('lastModified'), 'updated', 'Last modified');
+        }
+        if ($embargoUntil) {
+            $dates[] = $this->dateEntry($embargoUntil, 'available', 'Open access date');
+        }
+        if (!empty($dates)) {
+            $article['metadata']['dates'] = $dates;
         }
 
         // DOI
@@ -511,6 +538,104 @@ class ZenodoJsonFilter extends PKPImportExportFilter
     private function resourceType(string $resourceTypeId): array
     {
         return ['id' => $resourceTypeId, 'title' => ['en' => self::RESOURCE_TYPE_TITLES[$resourceTypeId]]];
+    }
+
+    /**
+     * Helper function returning an InvenioRDM date entry.
+     */
+    private function dateEntry(string|Carbon $date, string $typeId, string $description): array
+    {
+        return [
+            'date' => Carbon::parse($date)->format('Y-m-d'),
+            'type' => ['id' => $typeId],
+            'description' => $description,
+        ];
+    }
+
+    /**
+     * Helper function adding an ISO 639-3 language to a title or description entry.
+     */
+    private function withLanguage(array $entry, string $locale): array
+    {
+        $iso3 = LocaleConversion::getIso3FromLocale($locale);
+        if ($iso3) {
+            $entry['lang'] = ['id' => $iso3];
+        }
+        return $entry;
+    }
+
+    /**
+     * InvenioRDM rejects titles and descriptions shorter than three characters.
+     */
+    private function isValidText(?string $text): bool
+    {
+        return mb_strlen(trim(strip_tags((string) $text))) >= 3;
+    }
+
+    /**
+     * Helper function for the subtitle and the titles in other locales.
+     * https://inveniordm.docs.cern.ch/reference/metadata/#additional-titles-0-n
+     */
+    private function getAdditionalTitlesData(Publication $publication, string $publicationLocale): array
+    {
+        $titles = [];
+        $allTitles = $publication->getTitles();
+        $allSubtitles = $publication->getSubTitles();
+
+        if ($this->isValidText($allSubtitles[$publicationLocale] ?? null)) {
+            $titles[] = $this->withLanguage([
+                'title' => $allSubtitles[$publicationLocale],
+                'type' => ['id' => 'subtitle'],
+            ], $publicationLocale);
+        }
+
+        foreach ($allTitles as $locale => $title) {
+            if ($locale == $publicationLocale) {
+                continue;
+            }
+            $fullTitle = isset($allSubtitles[$locale])
+                ? PKPString::concatTitleFields([$title, $allSubtitles[$locale]])
+                : $title;
+            if ($this->isValidText($fullTitle)) {
+                $titles[] = $this->withLanguage([
+                    'title' => $fullTitle,
+                    'type' => ['id' => 'translated-title'],
+                ], $locale);
+            }
+        }
+
+        return $titles;
+    }
+
+    /**
+     * Helper function mapping a license URL to an InvenioRDM rights entry: a vocabulary id for
+     * Creative Commons licenses (e.g. cc-by-4.0, cc0-1.0), otherwise a custom title and link.
+     * https://inveniordm.docs.cern.ch/reference/metadata/#rights-licenses-0-n
+     */
+    private function getRightsData(string $licenseUrl): ?array
+    {
+        $licenseUrl = trim($licenseUrl);
+        if ($licenseUrl === '') {
+            return null;
+        }
+
+        $ccPattern = '#^https?://(?:www\.)?creativecommons\.org/(?:licenses/([a-z-]+)|publicdomain/(zero|mark))/(\d\.\d)/?(?:(?:deed|legalcode)(?:\.[a-z_]+)?)?$#i';
+        if (preg_match($ccPattern, $licenseUrl, $match)) {
+            $id = match (strtolower($match[2])) {
+                'zero' => 'cc0-' . $match[3],
+                'mark' => 'cc-pdm-' . $match[3],
+                default => 'cc-' . strtolower($match[1]) . '-' . $match[3],
+            };
+            return ['id' => $id];
+        }
+
+        if (!filter_var($licenseUrl, FILTER_VALIDATE_URL)) {
+            return null;
+        }
+        return [
+            'title' => ['en' => $licenseUrl],
+            'link' => $licenseUrl,
+        ];
     }
 
     /**
