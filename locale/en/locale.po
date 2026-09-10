@@ -17,6 +17,14 @@ msgstr "Zenodo Export Plugin"
 msgid "plugins.importexport.zenodo.description"
 msgstr "Export journal articles to Zenodo."
 
+msgid "plugins.importexport.zenodo.missingFields"
+msgstr ""
+"Zenodo records carry the journal's publisher and ISSN. Please go to your <a href="
+"\"{$url}\">Journal Settings</a> and ensure you have entered them before depositing."
+
+msgid "plugins.importexport.zenodo.export.failure.missingMetadata"
+msgstr "The record can not be deposited because Zenodo requires the following metadata, which is missing: '{$param}'"
+
 msgid "plugins.importexport.zenodo.export.createAccount"
 msgstr "Create a Zenodo account to get started."
 

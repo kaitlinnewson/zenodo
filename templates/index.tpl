@@ -14,6 +14,13 @@
 		{$pageTitle}
 	</h1>
 
+	{if !$currentContext->getData('publisherInstitution') || !($currentContext->getData('onlineIssn') || $currentContext->getData('printIssn'))}
+		<p class="pkp_help">
+			{capture assign="contextSettingsUrl"}{url page="management" op="settings" path="context"}{/capture}
+			{translate key="plugins.importexport.zenodo.missingFields" url=$contextSettingsUrl}
+		</p>
+	{/if}
+
 	{if !empty($configurationErrors)}
 		{assign var="allowExport" value=false}
 	{else}

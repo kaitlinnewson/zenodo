@@ -179,6 +179,11 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
             return [['plugins.importexport.zenodo.register.error.noApiKey']];
         }
 
+        if ($missingMetadata = $this->validateRequiredMetadata($object)) {
+            $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $this->convertErrorMessage($missingMetadata));
+            return [$missingMetadata];
+        }
+
         $mintDoi = $this->mintZenodoDois($context);
         $isPublication = $object instanceof Publication;
         $doi = $isPublication ? $object->getDoi() : $object->getCurrentPublication()->getDoi();
@@ -637,6 +642,42 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
             }
         }
         return true;
+    }
+
+    /**
+     * Check the metadata InvenioRDM requires before any request is made, so a missing
+     * field is reported in one readable message rather than as the API's validation error.
+     *
+     * @return ?array [message key, missing fields] or null when nothing is missing
+     */
+    public function validateRequiredMetadata(Submission|Publication $object): ?array
+    {
+        $publication = $object instanceof Publication ? $object : $object->getCurrentPublication();
+        $missing = [];
+
+        if (!$publication?->getLocalizedTitle($publication->getData('locale'))) {
+            $missing[] = __('common.title');
+        }
+        if (collect($publication?->getData('authors') ?? [])->isEmpty()) {
+            $missing[] = __('submission.authors');
+        }
+        $issueId = $publication?->getData('issueId');
+        $issue = $issueId ? Repo::issue()->get($issueId) : null;
+        if (!$publication?->getData('datePublished') && !$issue?->getDatePublished()) {
+            $missing[] = __('publication.datePublished');
+        }
+
+        return empty($missing)
+            ? null
+            : ['plugins.importexport.zenodo.export.failure.missingMetadata', implode(', ', $missing)];
+    }
+
+    /**
+     * Localize an error message stored as [message key, parameter].
+     */
+    public function convertErrorMessage(array $errorMessage): string
+    {
+        return __($errorMessage[0], ['param' => $errorMessage[1] ?? null]);
     }
 
     /**

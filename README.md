@@ -30,6 +30,12 @@ of a record to deposit in Zenodo.
 
 ## Using the Plugin
 
+### Required Metadata
+
+Zenodo requires a title, at least one author and a publication date. A record missing any of these is
+not sent; it is marked as failed with a message naming the missing fields. The journal's publisher and
+ISSN are included in every record, and the plugin page shows a reminder when either is not set.
+
 ### DOIs
 
 By default, the plugin expects that exported records have a DOI, and records will not be exported if a DOI
