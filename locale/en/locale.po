@@ -114,6 +114,9 @@ msgstr "Submitting the review request to the community was not successful! The Z
 msgid "plugins.importexport.zenodo.api.error.acceptReviewError"
 msgstr "Accepting the review request to the community was not successful! The Zenodo API returned an error: '{$param}'."
 
+msgid "plugins.importexport.zenodo.api.error.reviewCancelError"
+msgstr "Cancelling the review request was not successful! The Zenodo API returned an error: '{$param}'."
+
 msgid "plugins.importexport.zenodo.api.error.reviewCheckError"
 msgstr "Checking for a review request was not successful! The Zenodo API returned an error: '{$param}'."
 

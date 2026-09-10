@@ -79,8 +79,10 @@ class ZenodoJsonFilter extends PKPImportExportFilter
     /**
      * @param Submission|Publication $pubObject
      *
-     * @return string JSON
      * @throws Exception
+     *
+     * @return string JSON
+     *
      * @see Filter::process()
      *
      */
@@ -135,14 +137,23 @@ class ZenodoJsonFilter extends PKPImportExportFilter
         // Access Rights
         $status = 'open';
         $fileAccess = 'public';
+        $embargoUntil = null;
 
-        if ($issue) {
-            if (
-                $context->getData('publishingMode') == Journal::PUBLISHING_MODE_SUBSCRIPTION &&
-                $issue->getAccessStatus() == Issue::ISSUE_ACCESS_SUBSCRIPTION
-            ) {
-                $status = $issue->getOpenAccessDate() ? 'embargoed' : 'metadata-only';
+        if (
+            $issue &&
+            $context->getData('publishingMode') == Journal::PUBLISHING_MODE_SUBSCRIPTION &&
+            $issue->getAccessStatus() == Issue::ISSUE_ACCESS_SUBSCRIPTION &&
+            $publication->getData('accessStatus') != Submission::ARTICLE_ACCESS_OPEN
+        ) {
+            $openAccessDate = $issue->getOpenAccessDate() ? Carbon::parse($issue->getOpenAccessDate()) : null;
+            if (!$openAccessDate) {
+                $status = 'restricted';
                 $fileAccess = 'restricted';
+            } elseif ($openAccessDate->isFuture()) {
+                // Zenodo requires the embargo date to be in the future; a past date means the issue is open.
+                $status = 'embargoed';
+                $fileAccess = 'restricted';
+                $embargoUntil = $openAccessDate;
             }
         }
 
@@ -152,10 +163,11 @@ class ZenodoJsonFilter extends PKPImportExportFilter
             'status' => $status,
         ];
 
-        if ($issue && $status == 'embargoed') {
-            $openAccessDate = Carbon::parse($issue->getOpenAccessDate());
-            $article['access']['embargo']['active'] = 'true';
-            $article['access']['embargo']['until'] = $openAccessDate->format('Y-m-d');
+        if ($embargoUntil) {
+            $article['access']['embargo'] = [
+                'active' => true,
+                'until' => $embargoUntil->format('Y-m-d'),
+            ];
         }
 
         // Journal Metadata
@@ -380,7 +392,7 @@ class ZenodoJsonFilter extends PKPImportExportFilter
 
             if (!$previousPublications->isEmpty()) {
                 $previousDois = [];
-                foreach ($previousPublications as $previousPublication) { /** @var $previousPublication Publication */
+                foreach ($previousPublications as $previousPublication) { /** @var Publication $previousPublication */
                     if (
                         ((int)$previousPublication->getData('versionMajor')
                         < (int)$publication->getData('versionMajor'))
