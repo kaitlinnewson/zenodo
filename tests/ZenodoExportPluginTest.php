@@ -15,6 +15,7 @@ namespace APP\plugins\generic\zenodo\tests;
 use APP\issue\Issue;
 use APP\issue\Repository as IssueRepository;
 use APP\journal\Journal;
+use APP\plugins\generic\zenodo\jobs\ZenodoDeposit;
 use APP\plugins\generic\zenodo\ZenodoExportPlugin;
 use APP\plugins\PubObjectsExportPlugin;
 use APP\publication\enums\VersionStage;
@@ -25,12 +26,15 @@ use Exception;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Exception\RequestException;
+use GuzzleHttp\Exception\ServerException;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
+use Illuminate\Support\Facades\Bus;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PKP\core\Registry;
 use PKP\db\DAORegistry;
 use PKP\doi\Doi;
@@ -40,6 +44,7 @@ use PKP\submission\GenreDAO;
 use PKP\submissionFile\SubmissionFile;
 use PKP\tests\PKPTestCase;
 use ReflectionMethod;
+use Throwable;
 
 #[CoversClass(ZenodoExportPlugin::class)]
 class ZenodoExportPluginTest extends PKPTestCase
@@ -714,6 +719,72 @@ class ZenodoExportPluginTest extends PKPTestCase
         $result = $this->invoke($plugin, 'deleteDraftFiles', [$this->createSubmissionWithZenodoId('123'), self::RECORDS_URL, 'key', '123']);
 
         $this->assertSame('plugins.importexport.zenodo.api.error.fileDeleteError', $result[0][0]);
+    }
+
+    //
+    // Queued deposits
+    //
+    public function testDepositingQueuesOneJobPerObjectAndMarksItSubmitted(): void
+    {
+        Bus::fake();
+        $plugin = $this->createPlugin(['apiKey' => 'secret']);
+        $submission = $this->createSubmissionWithZenodoId(null);
+        $plugin->expects($this->once())
+            ->method('updateStatus')
+            ->with($submission, PubObjectsExportPlugin::EXPORT_STATUS_SUBMITTED);
+
+        $this->assertTrue($plugin->queueDeposit($submission, $this->createJournal()));
+
+        Bus::assertDispatched(ZenodoDeposit::class, 1);
+    }
+
+    public function testNothingIsQueuedWithoutAnApiKey(): void
+    {
+        Bus::fake();
+        $plugin = $this->createPlugin();
+        $plugin->expects($this->never())->method('updateStatus');
+
+        $result = $plugin->queueDeposit($this->createSubmissionWithZenodoId(null), $this->createJournal());
+
+        $this->assertSame('plugins.importexport.zenodo.register.error.noApiKey', $result[0][0]);
+        Bus::assertNothingDispatched();
+    }
+
+    public static function transientFailureProvider(): array
+    {
+        $request = new Request('POST', 'https://zenodo.org/api/records');
+        return [
+            'connection refused' => [new ConnectException('refused', $request), true],
+            'no response' => [new RequestException('dropped', $request), true],
+            'server error' => [new ServerException('boom', $request, new Response(503)), true],
+            'rate limited' => [new RequestException('slow down', $request, new Response(429)), true],
+            'request timeout' => [new RequestException('timeout', $request, new Response(408)), true],
+            'validation refused' => [new RequestException('bad', $request, new Response(400)), false],
+            'not found' => [new RequestException('gone', $request, new Response(404)), false],
+            'forbidden' => [new RequestException('no', $request, new Response(403)), false],
+            'any other exception' => [new Exception('boom'), false],
+        ];
+    }
+
+    /**
+     * Only failures a later attempt may get past are retried by the queue.
+     */
+    #[DataProvider('transientFailureProvider')]
+    public function testTransientFailuresAreToldApart(Throwable $exception, bool $transient): void
+    {
+        $this->assertSame($transient, $this->createPlugin()->isTransientFailure($exception));
+    }
+
+    public function testTheLastFailureIsRememberedForTheJob(): void
+    {
+        $plugin = $this->createPlugin();
+        $request = new Request('POST', 'https://zenodo.org/api/records');
+
+        $this->invoke($plugin, 'getExceptionMessage', [new ServerException('boom', $request, new Response(502))]);
+        $this->assertTrue($plugin->wasLastFailureTransient());
+
+        $this->invoke($plugin, 'getExceptionMessage', [new RequestException('bad', $request, new Response(400))]);
+        $this->assertFalse($plugin->wasLastFailureTransient());
     }
 
     //

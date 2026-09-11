@@ -8,7 +8,8 @@ The workflow does not include cases where errors are encountered during the proc
 
 ```mermaid
 flowchart TD
-    Start([Start Deposit of Selected Records]) --> CheckAPIKey{API Key<br/>Configured?}
+    Start([Deposit Selected Records]) --> Queue[Queue One Job per Record<br/>Set Status: SUBMITTED]
+    Queue --> JobRuns([Job Runs]) --> CheckAPIKey{API Key<br/>Configured?}
 
     CheckAPIKey -->|No| ErrorNoKey[Return Error:<br/>No API Key]
     CheckAPIKey -->|Yes| Preflight{Preflight:<br/>title, authors, date,<br/>PDF galley, DOI or<br/>Zenodo DOIs enabled?}

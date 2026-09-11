@@ -18,12 +18,26 @@ Compatible with OJS 3.6 and later.
   - Enable test mode
   - If you don't have DOIs set up for your publications, enable Zenodo DOIs
 
+## Requirements
+
+Deposits are dispatched as queued jobs, so the installation needs a way of running them: either OJS's
+scheduled `ProcessQueueJobs` task (which runs with the rest of the scheduler) or a dedicated worker,
+`php lib/pkp/tools/jobs.php work`.
+
 ## Zenodo API
 
 This plugin uses the Invenio RDM API and does not use Zenodo's legacy API. Refer to
 [the Invenio RDM documentation](https://inveniordm.docs.cern.ch/reference/rest_api_index/) for more details.
 
 ## Deposit Workflow
+
+Deposits are queued: clicking Deposit (or the automatic deposit task running) dispatches one job per record,
+which builds the record's metadata, creates or updates the draft in Zenodo and uploads the galley files. The
+request returns as soon as the jobs are queued, so a slow Zenodo never blocks the browser, and each record's
+outcome is recorded against it individually. A record waiting on its job shows the Submitted status; when
+the job runs it becomes Deposited, or Failed with the error message. A deposit that fails because Zenodo
+could not be reached, timed out, rate-limited the request or answered with a server error is retried by
+the queue; a deposit Zenodo refused is not.
 
 A workflow diagram is available in the `docs` directory which outlines the steps in the plugin's workflow from selection
 of a record to deposit in Zenodo.

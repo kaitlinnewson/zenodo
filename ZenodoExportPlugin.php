@@ -17,11 +17,13 @@ namespace APP\plugins\generic\zenodo;
 use APP\core\Application;
 use APP\facades\Repo;
 use APP\plugins\generic\zenodo\filter\ZenodoJsonFilter;
+use APP\plugins\generic\zenodo\jobs\ZenodoDeposit;
 use APP\plugins\PubObjectsExportPlugin;
 use APP\publication\Publication;
 use APP\submission\Submission;
 use APP\template\TemplateManager;
 use Exception;
+use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Exception\GuzzleException;
 use GuzzleHttp\Exception\RequestException;
 use GuzzleHttp\Psr7;
@@ -51,6 +53,12 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
     public const ZENODO_API_OPERATION = 'records';
     public const REVIEW_OPEN = 'open';
     public const RECORD_DELETED = 'deleted';
+
+    /**
+     * Whether the last API failure was one a later attempt may get past (connection
+     * refused, timeout, rate limit, server error) rather than a refusal of the request.
+     */
+    protected bool $lastFailureTransient = false;
 
     /**
      * @copydoc Plugin::getName()
@@ -148,6 +156,17 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
     }
 
     /**
+     * @copydoc PubObjectsExportPlugin::getDepositSuccessNotificationMessageKey()
+     *
+     * Deposits are queued rather than performed in the request, so the deposit action
+     * reports that the records were submitted, not that they arrived.
+     */
+    public function getDepositSuccessNotificationMessageKey(): string
+    {
+        return 'plugins.importexport.zenodo.submit.success';
+    }
+
+    /**
      * @copydoc PubObjectsExportPlugin::getSettingsFormClassName()
      */
     public function getSettingsFormClassName(): string
@@ -168,6 +187,26 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
     }
 
     /**
+     * Queue the deposit of an object. The job builds the record and deposits it, so a
+     * slow Zenodo never blocks the request, and records the outcome on the object.
+     *
+     * @return bool|array True when queued, or an error message
+     */
+    public function queueDeposit(Submission|Publication $object, Context $context): bool|array
+    {
+        if (!$this->getApiKey($context)) {
+            return [['plugins.importexport.zenodo.register.error.noApiKey']];
+        }
+
+        dispatch(new ZenodoDeposit($object->getId(), $object instanceof Publication, $context->getId()));
+        $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_SUBMITTED);
+
+        return true;
+    }
+
+    /**
+     * Deposit an object's record to Zenodo. Run from the queued ZenodoDeposit job.
+     *
      * @param Submission|Publication $object
      * @param Context $context
      * @param string $jsonString Export JSON string
@@ -179,6 +218,8 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
      */
     public function depositXML($object, $context, $jsonString): bool|array
     {
+        $this->lastFailureTransient = false;
+
         $apiKey = $this->getApiKey($context);
         if (!$apiKey) {
             return [['plugins.importexport.zenodo.register.error.noApiKey']];
@@ -352,15 +393,9 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
         $context = $request->getContext();
         $path = ['plugin', $this->getName()];
         if ($request->getUserVar(PubObjectsExportPlugin::EXPORT_ACTION_DEPOSIT)) {
-            $filter = $context->getData(Context::SETTING_DOI_VERSIONING)
-                ? 'publication=>zenodo-json'
-                : 'article=>zenodo-json';
             $resultErrors = [];
             foreach ($objects as $object) {
-                // Get the JSON
-                $exportJson = $this->exportJSON($object, $filter, $context);
-                // Deposit the JSON
-                $result = $this->depositXML($object, $context, $exportJson);
+                $result = $this->queueDeposit($object, $context);
                 if (is_array($result)) {
                     $resultErrors[] = $result;
                 }
@@ -846,10 +881,38 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
     }
 
     /**
+     * Whether the last API failure was transient, so a queued deposit should be retried.
+     */
+    public function wasLastFailureTransient(): bool
+    {
+        return $this->lastFailureTransient;
+    }
+
+    /**
+     * Whether a failure may get past on a later attempt: no connection or response, a
+     * timeout, a rate limit or a server error. A 4xx refusal of the request is not.
+     */
+    public function isTransientFailure(Throwable $e): bool
+    {
+        if ($e instanceof ConnectException) {
+            return true;
+        }
+        if ($e instanceof RequestException) {
+            if (!$e->hasResponse()) {
+                return true;
+            }
+            $status = $e->getResponse()->getStatusCode();
+            return $status >= 500 || in_array($status, [408, 429]);
+        }
+        return false;
+    }
+
+    /**
      * Build an error message from an HTTP client exception, including the response when there is one.
      */
     protected function getExceptionMessage(Throwable $e): string
     {
+        $this->lastFailureTransient = $this->isTransientFailure($e);
         if ($e instanceof RequestException && $e->hasResponse()) {
             $response = $e->getResponse();
             return $response->getBody() . ' (' . $response->getStatusCode() . ' ' . $response->getReasonPhrase() . ')';

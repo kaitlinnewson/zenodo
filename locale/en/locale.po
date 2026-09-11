@@ -82,6 +82,12 @@ msgstr ""
 "for registration. "
 "Please do not forget to disable this option for production."
 
+msgid "plugins.importexport.zenodo.submit.success"
+msgstr "The selected records have been queued for deposit to Zenodo. Each record's status is updated when its deposit runs."
+
+msgid "plugins.importexport.zenodo.export.failure.journalNotFound"
+msgstr "The journal this deposit was queued for could not be found."
+
 msgid "plugins.importexport.zenodo.senderTask.name"
 msgstr "Zenodo automatic registration task"
 
