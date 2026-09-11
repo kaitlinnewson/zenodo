@@ -3,8 +3,8 @@
 /**
  * @file plugins/generic/zenodo/ZenodoExportPlugin.php
  *
- * Copyright (c) 2025 Simon Fraser University
- * Copyright (c) 2025 John Willinsky
+ * Copyright (c) 2025-2026 Simon Fraser University
+ * Copyright (c) 2025-2026 John Willinsky
  * Distributed under the GNU GPL v3. For full terms see the file LICENSE.
  *
  * @class ZenodoExportPlugin
@@ -45,9 +45,12 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
     public const ZENODO_API_ACCEPTED = 202;
     public const ZENODO_API_NO_CONTENT = 204;
     public const ZENODO_API_NOT_FOUND = 404;
+    public const ZENODO_API_GONE = 410;
     public const ZENODO_API_URL = 'https://zenodo.org/api/';
     public const ZENODO_API_URL_DEV = 'https://sandbox.zenodo.org/api/';
     public const ZENODO_API_OPERATION = 'records';
+    public const REVIEW_OPEN = 'open';
+    public const RECORD_DELETED = 'deleted';
 
     /**
      * @copydoc Plugin::getName()
@@ -194,27 +197,31 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
         $zenodoApiUrl = ($this->isTestMode($context) ? self::ZENODO_API_URL_DEV : self::ZENODO_API_URL);
         $recordsApiUrl = $zenodoApiUrl . self::ZENODO_API_OPERATION;
 
-        $isUpdate = false;
+        $existingZenodoId = $object->getData($this->getIdSettingName()) ?: null;
         $isPublished = false;
-        if ($existingZenodoId = $object->getData($this->getIdSettingName())) {
-            $isUpdate = true;
+        if ($existingZenodoId) {
             $isPublished = $this->isRecordPublished($object, $existingZenodoId, $recordsApiUrl);
             if (is_array($isPublished)) {
                 // Don't continue if we can't check the published status.
                 return $isPublished;
             }
-        }
-
-        if ($isUpdate && !$isPublished) {
-            $result = $this->deleteDraft($object, $existingZenodoId, $zenodoApiUrl, $apiKey, $isPublished);
-            if (is_array($result)) {
-                return $result;
+            if ($isPublished === self::RECORD_DELETED) {
+                // A record deleted in Zenodo leaves a tombstone that can not be updated;
+                // its DOI is released, so the article is deposited as a new record.
+                $this->removeZenodoId($object);
+                $existingZenodoId = null;
+                $isPublished = false;
             }
-            // Re-check the existing Zenodo ID as it may have been deleted.
-            $existingZenodoId = $object->getData($this->getIdSettingName());
         }
 
-        $zenodoId = $this->createOrUpdateDraft($jsonString, $object, $recordsApiUrl, $apiKey, $isPublished, $existingZenodoId);
+        $zenodoId = $this->createOrUpdateDraft(
+            $jsonString,
+            $object,
+            $recordsApiUrl,
+            $apiKey,
+            $isPublished,
+            $existingZenodoId
+        );
         if (is_array($zenodoId)) {
             return $zenodoId;
         }
@@ -238,16 +245,36 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
                 ->each(fn (Publication $publication) => Repo::publication()->edit($publication, $editParams));
         }
 
-        // Note: can't update files on published records.
+        // Files can not be changed on a published record. An existing draft keeps its
+        // files between deposits, so they are replaced with the current galley files.
         if (!$isPublished) {
+            if ($zenodoId === $existingZenodoId) {
+                $filesDeleted = $this->deleteDraftFiles($object, $recordsApiUrl, $apiKey, $zenodoId);
+                if (is_array($filesDeleted)) {
+                    return $filesDeleted;
+                }
+            }
             $filesDeposit = $this->depositFiles($object, $recordsApiUrl, $apiKey, $zenodoId);
             if (is_array($filesDeposit)) {
                 return $filesDeposit;
             }
         }
 
+        // A draft under community review can neither be published directly nor have its
+        // request replaced: Zenodo refuses both while the request is open. The request is
+        // kept, and acceptance is what publishes the record.
+        $communityId = $this->getCommunityId($context);
+        $existingReview = null;
+        if ($communityId && !$isPublished) {
+            $existingReview = $this->getReviewRequest($object, $zenodoId, $zenodoApiUrl, $apiKey);
+            if (isset($existingReview['error'])) {
+                return [$existingReview['error']];
+            }
+        }
+        $hasOpenReview = !empty($existingReview['is_open']);
+
         // Publish based on settings or updating a previously published record.
-        if ($this->automaticPublishing($context) || $isPublished) {
+        if (($this->automaticPublishing($context) && !$hasOpenReview) || $isPublished) {
             $published = $this->publishZenodoDraft($object, $zenodoId, $recordsApiUrl, $apiKey);
             if (is_array($published)) {
                 return $published;
@@ -262,7 +289,6 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
         $this->updateObject($object);
 
         // Submit the record to a community (record may be published depending on settings).
-        $communityId = $this->getCommunityId($context);
         if ($communityId) {
             $requestId = null;
             if ($isPublished) {
@@ -271,14 +297,29 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
                     return $requestId;
                 }
             } else {
-                if ($review = $this->createReview($object, $zenodoId, $communityId, $recordsApiUrl, $apiKey)) {
+                if ($hasOpenReview) {
+                    $requestId = $existingReview['id'];
+                } else {
+                    $review = $this->createReview($object, $zenodoId, $communityId, $recordsApiUrl, $apiKey);
+                    if (is_array($review)) {
+                        return $review;
+                    }
+                    if ($review === self::REVIEW_OPEN) {
+                        // Zenodo refused to replace a request this plugin could not see. The record
+                        // is updated and the request stays open; only automatic acceptance is impossible.
+                        return $this->automaticPublishingCommunity($context)
+                            ? [['plugins.importexport.zenodo.api.error.openReviewNotAccepted']]
+                            : true;
+                    }
                     $requestId = $this->submitReview($object, $zenodoId, $zenodoApiUrl, $apiKey);
                     if (is_array($requestId)) {
                         return $requestId;
                     }
-                } elseif (is_array($review)) {
-                    return $review;
                 }
+            }
+            if ($requestId) {
+                $object->setData($this->getReviewRequestIdSettingName(), $requestId);
+                $this->updateObject($object);
             }
             $autoPublishCommunity = $this->automaticPublishingCommunity($context);
             if ($autoPublishCommunity && $requestId) {
@@ -436,11 +477,19 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
     }
 
     /**
-     * Get Zenodo ID setting name.
+     * Get the Zenodo record ID setting name.
      */
     public function getIdSettingName(): string
     {
         return $this->getPluginSettingsPrefix() . '::id';
+    }
+
+    /**
+     * Get the community review request ID setting name.
+     */
+    public function getReviewRequestIdSettingName(): string
+    {
+        return $this->getPluginSettingsPrefix() . '::reviewRequestId';
     }
 
     /**
@@ -450,12 +499,17 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
     {
         return array_merge(parent::getObjectAdditionalSettings(), [
             $this->getIdSettingName(),
+            $this->getReviewRequestIdSettingName(),
             $this->getDepositStatusSettingName()
         ]);
     }
 
     /**
-     * Create a draft or update an existing record in Zenodo.
+     * Create a draft in Zenodo, or update the one this object already has.
+     *
+     * An unpublished draft is updated in place, which keeps its Zenodo id, any reserved
+     * DOI and any open community review request. A draft that was removed in Zenodo is
+     * replaced by a new one. A published record gets a new draft to carry the update.
      */
     protected function createOrUpdateDraft(
         string $json,
@@ -465,6 +519,40 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
         bool $isPublished = false,
         ?string $zenodoId = null
     ): string|array {
+        $draftUrl = $url . '/' . $zenodoId . '/draft';
+
+        if ($isPublished) {
+            $publishDraft = $this->createDraftFromPublished($object, $url, $apiKey, $zenodoId);
+            if (is_array($publishDraft)) {
+                return $publishDraft;
+            }
+            return $this->sendDraft('PUT', $draftUrl, $json, $object, $apiKey);
+        }
+
+        if ($zenodoId) {
+            $result = $this->sendDraft('PUT', $draftUrl, $json, $object, $apiKey, true);
+            if ($result !== null) {
+                return $result;
+            }
+            $this->removeZenodoId($object);
+        }
+
+        return $this->sendDraft('POST', $url, $json, $object, $apiKey);
+    }
+
+    /**
+     * Send draft metadata to Zenodo and return the record id.
+     *
+     * @param bool $allowNotFound Return null when the draft no longer exists, instead of an error
+     */
+    protected function sendDraft(
+        string $method,
+        string $url,
+        string $json,
+        Submission|Publication $object,
+        string $apiKey,
+        bool $allowNotFound = false
+    ): string|array|null {
         $httpClient = Application::get()->getHttpClient();
         $headers = [
             'Content-Type' => 'application/json',
@@ -472,23 +560,9 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
             'Authorization' => 'Bearer ' . $apiKey,
         ];
 
-        // If the record is published, create a new draft first that we will update
-        if ($isPublished) {
-            $publishDraft = $this->createDraftFromPublished($object, $url, $apiKey, $zenodoId);
-            if (is_array($publishDraft)) {
-                return $publishDraft;
-            }
-        }
-
-        // Settings depending on whether we are updating a published record or creating a record
-        $operation = $isPublished ? 'PUT' : 'POST';
-        if ($isPublished && $zenodoId) {
-            $url = $url . '/' . $zenodoId . '/draft';
-        }
-
         try {
             $response = $httpClient->request(
-                $operation,
+                $method,
                 $url,
                 [
                     'headers' => $headers,
@@ -496,6 +570,10 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
                 ]
             );
         } catch (RequestException $e) {
+            // A draft removed in Zenodo answers 404, or 410 once its identifier is marked deleted.
+            if ($allowNotFound && in_array($e->getCode(), [self::ZENODO_API_NOT_FOUND, self::ZENODO_API_GONE])) {
+                return null;
+            }
             $returnMessage = $this->getExceptionMessage($e);
             $errorMessage = __('plugins.importexport.zenodo.register.error.mdsError', ['param' => $returnMessage]);
             $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
@@ -780,54 +858,35 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
     }
 
     /**
-     * Delete a draft record in Zenodo.
-     * https://inveniordm-dev.docs.cern.ch/reference/rest_api_drafts_records/#deletediscard-a-draft-record
+     * Remove the files of an existing draft so the current galley files can replace them.
+     * https://inveniordm.docs.cern.ch/reference/rest_api_drafts_records/#delete-a-draft-file
      */
-    protected function deleteDraft(
+    protected function deleteDraftFiles(
         Submission|Publication $object,
-        string $zenodoId,
         string $url,
         string $apiKey,
-        bool $isPublished
+        string $zenodoId
     ): bool|array {
-        // @todo unable to get requests for a draft, following up with zenodo team
-        // for now, the user will have to cancel it in the Zenodo UI.
-        //    $reviewRequestId = $this->getReviewRequest($zenodoId, $url, $apiKey);
-        //        if ($reviewRequestId) {
-        //            $this->cancelReviewRequest($reviewRequestId, $url, $apiKey);
-        //        }
-
         $httpClient = Application::get()->getHttpClient();
-        $deleteRecordUrl = $url . self::ZENODO_API_OPERATION . '/' . $zenodoId . '/draft';
-        $deleteRecordHeaders = [
+        $filesUrl = $url . '/' . $zenodoId . '/draft/files';
+        $headers = [
+            'Accept' => 'application/json',
             'Authorization' => 'Bearer ' . $apiKey,
         ];
 
         try {
-            $httpClient->request(
-                'DELETE',
-                $deleteRecordUrl,
-                [
-                    'headers' => $deleteRecordHeaders,
-                ],
-            );
-        } catch (RequestException $e) {
-            if ($e->getCode() === self::ZENODO_API_NOT_FOUND && !$isPublished) {
-                // The user deleted the record in Zenodo - remove the existing Zenodo ID.
-                $this->removeZenodoId($object);
-                $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_NOT_DEPOSITED);
-                return true;
+            $response = $httpClient->request('GET', $filesUrl, ['headers' => $headers]);
+            $entries = json_decode($response->getBody(), true)['entries'] ?? [];
+            foreach ($entries as $entry) {
+                $httpClient->request('DELETE', $filesUrl . '/' . rawurlencode($entry['key']), ['headers' => $headers]);
             }
+        } catch (RequestException $e) {
             $returnMessage = $this->getExceptionMessage($e);
-            $errorMessage = __('plugins.importexport.zenodo.api.error.recordDeleteError', ['param' => $returnMessage]);
+            $errorMessage = __('plugins.importexport.zenodo.api.error.fileDeleteError', ['param' => $returnMessage]);
             $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
-            return [['plugins.importexport.zenodo.api.error.recordDeleteError', $e->getMessage()]];
+            return [['plugins.importexport.zenodo.api.error.fileDeleteError', $e->getMessage()]];
         }
 
-        // Clear Zenodo ID if the record was not previously published.
-        if (!$isPublished) {
-            $this->removeZenodoId($object);
-        }
         return true;
     }
 
@@ -904,7 +963,7 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
     /**
      * Check if a Zenodo record has been published.
      */
-    public function isRecordPublished(Submission|Publication $object, string $zenodoId, string $url): bool|array
+    public function isRecordPublished(Submission|Publication $object, string $zenodoId, string $url): bool|string|array
     {
         $recordUrl = $url . '/' . $zenodoId;
         $httpClient = Application::get()->getHttpClient();
@@ -921,6 +980,8 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
         } catch (GuzzleException | Exception $e) {
             if ($e->getCode() === self::ZENODO_API_NOT_FOUND) {
                 return false;
+            } elseif ($e->getCode() === self::ZENODO_API_GONE) {
+                return self::RECORD_DELETED;
             } else {
                 $returnMessage = $this->getExceptionMessage($e);
                 $errorMessage = __('plugins.importexport.zenodo.api.error.publishCheckError', ['param' => $returnMessage]);
@@ -941,7 +1002,7 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
         string $communityId,
         string $url,
         string $apiKey
-    ): bool|array {
+    ): bool|string|array {
         $communityUrl = $url . '/' . $zenodoId . '/draft/review';
         $httpClient = Application::get()->getHttpClient();
 
@@ -966,6 +1027,10 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
             );
         } catch (RequestException $e) {
             $returnMessage = $this->getExceptionMessage($e);
+            // "An open review cannot be deleted.": the draft already has an open request.
+            if ($e->getCode() === 400 && stripos($returnMessage, 'open review') !== false) {
+                return self::REVIEW_OPEN;
+            }
             $errorMessage = __('plugins.importexport.zenodo.api.error.createReviewError', ['param' => $returnMessage]);
             $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
             return [['plugins.importexport.zenodo.api.error.createReviewError', $returnMessage]];
@@ -1107,61 +1172,78 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
     }
 
     /**
-     * Check if there is an open review request for a Zenodo record and get the
-     * request ID if there is one.
+     * Get the community review request of a draft, if it has one.
      *
-     * @todo not yet in use until we determine how to get the request ID for a draft record.
+     * The request id stored when the plugin submitted it is looked up through the
+     * requests API. Without a stored id, the draft record's parent is read instead.
+     * Zenodo's own review endpoint (GET …/draft/review) answers 500 and is not used.
+     * https://inveniordm.docs.cern.ch/reference/rest_api_requests/#get-a-request
+     *
+     * @param string $url The Zenodo API base URL
+     *
+     * @return ?array The request's id, status and whether it is open; null when the draft
+     *  has no request; ['error' => [message key, detail]] when the check itself failed
      */
-    public function getReviewRequest(string $zenodoId, string $url, string $apiKey): bool|string
+    public function getReviewRequest(Submission|Publication $object, string $zenodoId, string $url, string $apiKey): ?array
     {
-        $reviewUrl = $url . self::ZENODO_API_OPERATION . '/' . $zenodoId . '/requests';
         $httpClient = Application::get()->getHttpClient();
-
-        $acceptHeaders = [
+        $headers = [
             'Accept' => 'application/json',
             'Authorization' => 'Bearer ' . $apiKey,
         ];
 
+        $requestId = $object->getData($this->getReviewRequestIdSettingName());
+        $requestUrl = $requestId
+            ? $url . 'requests/' . $requestId
+            : $url . self::ZENODO_API_OPERATION . '/' . $zenodoId . '/draft';
+
         try {
-            $reviewResponse = $httpClient->request(
-                'GET',
-                $reviewUrl,
-                [
-                    'headers' => $acceptHeaders,
-                ]
-            );
+            $response = $httpClient->request('GET', $requestUrl, ['headers' => $headers]);
         } catch (GuzzleException | Exception $e) {
             $returnMessage = $this->getExceptionMessage($e);
-            error_log(__('plugins.importexport.zenodo.api.error.reviewCheckError', ['param' => $returnMessage]));
-            return false;
+            $errorMessage = __('plugins.importexport.zenodo.api.error.reviewCheckError', ['param' => $returnMessage]);
+            $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
+            return ['error' => ['plugins.importexport.zenodo.api.error.reviewCheckError', $returnMessage]];
         }
 
-        $body = json_decode($reviewResponse->getBody(), true);
-        return $body['id'] ?? false;
+        $body = json_decode($response->getBody(), true);
+        $review = $requestId ? $body : ($body['parent']['review'] ?? null);
+        if (empty($review['id'])) {
+            return null;
+        }
+        return [
+            'id' => $review['id'],
+            'status' => $review['status'] ?? null,
+            'is_open' => $review['is_open'] ?? (($review['status'] ?? null) === 'submitted'),
+        ];
     }
 
     /**
      * Cancel a review request to a community.
      * https://inveniordm.docs.cern.ch/reference/rest_api_requests/#cancel-a-request
-     *
-     * @todo not yet in use until we can determine how to get the request ID for a draft.
      */
     public function cancelReviewRequest(string $requestId, string $url, string $apiKey): bool|array
     {
         $cancelUrl = $url . 'requests/' . $requestId . '/actions/cancel';
         $httpClient = Application::get()->getHttpClient();
 
-        $acceptHeaders = [
+        $headers = [
             'Accept' => 'application/json',
             'Authorization' => 'Bearer ' . $apiKey,
         ];
 
         try {
             $httpClient->request(
-                'DELETE',
+                'POST',
                 $cancelUrl,
                 [
-                    'headers' => $acceptHeaders,
+                    'headers' => $headers,
+                    'json' => [
+                        'payload' => [
+                            'content' => 'This request was cancelled from the OJS Zenodo plugin.',
+                            'format' => 'html'
+                        ],
+                    ]
                 ]
             );
         } catch (RequestException $e) {
@@ -1177,10 +1259,12 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
     public function removeZenodoId(Submission|Publication $object): void
     {
         $object->setData($this->getIdSettingName(), null);
+        $object->setData($this->getReviewRequestIdSettingName(), null);
         $this->updateObject($object);
         if ($object instanceof Publication) {
             $editParams = [
                 $this->getIdSettingName() => null,
+                $this->getReviewRequestIdSettingName() => null,
             ];
             Repo::publication()->getCollector()
                 ->filterBySubmissionIds([$object->getData('submissionId')])

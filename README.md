@@ -50,6 +50,24 @@ The DOI minted in Zenodo is not saved in OJS.
 If DOI versioning is enabled in OJS, then the user can deposit each major version of an article to Zenodo as an
 individual record. The previous version will be included in the relations metadata.
 
+### Updating a Deposit
+
+Depositing a record again updates the draft in Zenodo in place, so it keeps its Zenodo identifier, any
+DOI Zenodo reserved for it and any community review request that is still open. The draft's files are
+replaced with the current galley files. If the draft was removed in Zenodo, a new one is created. Once a
+record is published in Zenodo, later deposits update its metadata only, since Zenodo does not allow the
+files of a published record to change.
+
+If a published record is deleted in Zenodo, only a tombstone remains and it can not be updated. The next
+deposit then creates a new record. Zenodo releases an external DOI when the record is deleted, so the new
+record carries the article's DOI from OJS; a DOI minted by Zenodo stays with the tombstone and the new
+record receives another one.
+
+A draft that has been submitted to a community keeps its review request across deposits: Zenodo does not
+allow an open request to be replaced, deleted or published over, so the record is published when the
+community accepts it. To submit the record to a different community, cancel the open request in Zenodo
+first.
+
 ### Automatic Publishing
 
 By default, the plugin will create a draft record in Zenodo, which can then be published in the Zenodo application.

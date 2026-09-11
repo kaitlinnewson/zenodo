@@ -19,21 +19,25 @@ flowchart TD
     CheckExisting -->|Yes| CheckPublished{Is Record<br/>published in Zenodo?}
     CheckExisting -->|No| CreateDraft[Create New Draft]
 
-    CheckPublished -->|No - is Draft| DeleteDraft[Delete Existing Draft]
+    CheckPublished -->|Deleted in Zenodo<br/>tombstone| CreateDraft
+    CheckPublished -->|No - is Draft| UpdateExisting[Update Existing<br/>Draft Metadata]
     CheckPublished -->|Yes| CreateFromPublished[Create Draft from<br/>Published Record]
 
-    DeleteDraft --> CreateDraft
+    UpdateExisting -->|Draft was removed<br/>in Zenodo| CreateDraft
+    UpdateExisting -->|Updated| SetZenodoID[Store Zenodo ID<br/>for Object & Siblings]
     CreateFromPublished --> UpdateDraft[Update Draft Metadata]
 
-    CreateDraft --> SetZenodoID[Store Zenodo ID<br/>for Object & Siblings]
+    CreateDraft --> SetZenodoID
     UpdateDraft --> SetZenodoID
 
     SetZenodoID --> CheckPublishedForFiles{Is Record<br/>Published?}
 
     CheckPublishedForFiles -->|Yes| SkipFiles[Skip File Upload<br/>Cannot update files<br/>on published records]
-    CheckPublishedForFiles -->|No| DepositFiles[Upload Files from Galleys]
+    CheckPublishedForFiles -->|No, existing draft| ReplaceFiles[Delete Draft Files]
+    CheckPublishedForFiles -->|No, new draft| DepositFiles[Upload Files from Galleys]
+    ReplaceFiles --> DepositFiles
 
-    DepositFiles --> CheckAutoPublish{Auto Publish<br/>Setting Enabled or<br/>Previously Published?}
+    DepositFiles --> CheckAutoPublish{Auto Publish Enabled<br/>and No Open Review,<br/>or Previously Published?}
     SkipFiles --> CheckAutoPublish
 
     CheckAutoPublish -->|Yes| PublishDraft[Publish Draft]
@@ -48,11 +52,13 @@ flowchart TD
     CheckCommunity -->|Yes| CheckIfPublished{Is Record<br/>Published?}
 
     CheckIfPublished -->|Yes| SubmitPublished[Submit Published<br/>Record to Community]
-    CheckIfPublished -->|No| CreateReview[Create Review Request]
+    CheckIfPublished -->|No| CheckExistingReview{Open Review<br/>Request Exists?}
 
+    CheckExistingReview -->|No| CreateReview[Create Review Request]
+    CheckExistingReview -->|Yes| CheckAutoPublishCommunity{Auto Publish Community<br/>Setting Enabled?}
     CreateReview --> SubmitReview[Submit Review Request]
 
-    SubmitPublished --> CheckAutoPublishCommunity{Auto Publish Community<br/>Setting Enabled?}
+    SubmitPublished --> CheckAutoPublishCommunity
     SubmitReview --> CheckAutoPublishCommunity
 
     CheckAutoPublishCommunity -->|Yes| AcceptReview[Accept Review<br/>Publishes record<br />if not already published]

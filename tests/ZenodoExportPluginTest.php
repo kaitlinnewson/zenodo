@@ -22,11 +22,16 @@ use APP\publication\Publication;
 use APP\submission\Submission;
 use APP\submissionFile\Repository as SubmissionFileRepository;
 use Exception;
+use GuzzleHttp\Client;
 use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Exception\RequestException;
+use GuzzleHttp\Handler\MockHandler;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PKP\core\Registry;
 use PKP\db\DAORegistry;
 use PKP\doi\Doi;
 use PKP\galley\Galley;
@@ -70,9 +75,10 @@ class ZenodoExportPluginTest extends PKPTestCase
      */
     private function createPlugin(array $settings = []): ZenodoExportPlugin
     {
+        // Status and object updates write to the database, which these tests do not use.
         $plugin = $this->getMockBuilder(ZenodoExportPlugin::class)
             ->disableOriginalConstructor()
-            ->onlyMethods(['getSetting'])
+            ->onlyMethods(['getSetting', 'updateStatus', 'updateObject'])
             ->getMock();
 
         $plugin->method('getSetting')
@@ -532,5 +538,343 @@ class ZenodoExportPluginTest extends PKPTestCase
     public function testAPublicationWithoutGalleysHasNothingToDeposit(): void
     {
         $this->assertSame([], $this->createPlugin()->getDepositableGalleys($this->createPublication()));
+    }
+
+    //
+    // Draft updates
+    //
+    private const API_URL = 'https://sandbox.zenodo.org/api/';
+    private const RECORDS_URL = 'https://sandbox.zenodo.org/api/records';
+
+    /**
+     * Serve the given responses from the application's HTTP client, in order, and
+     * collect the requests made. A 4xx or 5xx response is raised as Guzzle would.
+     *
+     * @param Response[] $responses
+     */
+    private array $history = [];
+
+    private function mockHttp(array $responses): void
+    {
+        $this->history = [];
+        $stack = HandlerStack::create(new MockHandler($responses));
+        $stack->push(Middleware::history($this->history));
+        $client = new Client(['handler' => $stack]);
+        Registry::set(PKPTestCase::MOCKED_GUZZLE_CLIENT_NAME, $client);
+    }
+
+    private function jsonResponse(int $status, array $body): Response
+    {
+        return new Response($status, ['Content-Type' => 'application/json'], json_encode($body));
+    }
+
+    /**
+     * @return array [method, path] of each request made
+     */
+    private function requestsMade(): array
+    {
+        return array_map(
+            fn ($entry) => [$entry['request']->getMethod(), $entry['request']->getUri()->getPath()],
+            $this->history
+        );
+    }
+
+    private function createSubmissionWithZenodoId(?string $zenodoId): Submission
+    {
+        $submission = new Submission();
+        $submission->setId(1);
+        $submission->setData('zenodo::id', $zenodoId);
+        return $submission;
+    }
+
+    public function testAnExistingDraftIsUpdatedInPlace(): void
+    {
+        $this->mockHttp([$this->jsonResponse(200, ['id' => '123'])]);
+        $plugin = $this->createPlugin();
+
+        $result = $this->invoke($plugin, 'createOrUpdateDraft', ['{}', $this->createSubmissionWithZenodoId('123'), self::RECORDS_URL, 'key', false, '123']);
+
+        $this->assertSame('123', $result);
+        $this->assertSame([['PUT', '/api/records/123/draft']], $this->requestsMade());
+    }
+
+    /**
+     * A draft the user removed in Zenodo can not be updated, so the stored id is
+     * forgotten and a new draft created.
+     */
+    public function testADraftRemovedInZenodoIsRecreated(): void
+    {
+        $this->mockHttp([new Response(404), $this->jsonResponse(201, ['id' => '456'])]);
+        $plugin = $this->createPlugin();
+        $submission = $this->createSubmissionWithZenodoId('123');
+
+        $result = $this->invoke($plugin, 'createOrUpdateDraft', ['{}', $submission, self::RECORDS_URL, 'key', false, '123']);
+
+        $this->assertSame('456', $result);
+        $this->assertNull($submission->getData('zenodo::id'));
+        $this->assertSame([['PUT', '/api/records/123/draft'], ['POST', '/api/records']], $this->requestsMade());
+    }
+
+    public function testADraftWhoseIdentifierIsGoneIsRecreated(): void
+    {
+        $this->mockHttp([new Response(410), $this->jsonResponse(201, ['id' => '456'])]);
+        $submission = $this->createSubmissionWithZenodoId('123');
+
+        $result = $this->invoke($this->createPlugin(), 'createOrUpdateDraft', ['{}', $submission, self::RECORDS_URL, 'key', false, '123']);
+
+        $this->assertSame('456', $result);
+        $this->assertNull($submission->getData('zenodo::id'));
+        $this->assertSame([['PUT', '/api/records/123/draft'], ['POST', '/api/records']], $this->requestsMade());
+    }
+
+    /**
+     * Only a missing draft is recreated; any other failure of the update is reported.
+     */
+    public function testAnUpdateRefusedForAnotherReasonIsNotRecreated(): void
+    {
+        $this->mockHttp([new Response(403)]);
+        $plugin = $this->createPlugin();
+        $submission = $this->createSubmissionWithZenodoId('123');
+
+        $result = $this->invoke($plugin, 'createOrUpdateDraft', ['{}', $submission, self::RECORDS_URL, 'key', false, '123']);
+
+        $this->assertSame('plugins.importexport.zenodo.register.error.mdsError', $result[0][0]);
+        $this->assertSame('123', $submission->getData('zenodo::id'));
+        $this->assertCount(1, $this->history);
+    }
+
+    public function testANewDraftIsCreatedWithoutAStoredId(): void
+    {
+        $this->mockHttp([$this->jsonResponse(201, ['id' => '789'])]);
+
+        $result = $this->invoke($this->createPlugin(), 'createOrUpdateDraft', ['{}', $this->createSubmissionWithZenodoId(null), self::RECORDS_URL, 'key', false, null]);
+
+        $this->assertSame('789', $result);
+        $this->assertSame([['POST', '/api/records']], $this->requestsMade());
+    }
+
+    public function testAPublishedRecordGetsANewDraftForTheUpdate(): void
+    {
+        $this->mockHttp([$this->jsonResponse(201, ['id' => '123']), $this->jsonResponse(200, ['id' => '123'])]);
+
+        $result = $this->invoke($this->createPlugin(), 'createOrUpdateDraft', ['{}', $this->createSubmissionWithZenodoId('123'), self::RECORDS_URL, 'key', true, '123']);
+
+        $this->assertSame('123', $result);
+        $this->assertSame([['POST', '/api/records/123/draft'], ['PUT', '/api/records/123/draft']], $this->requestsMade());
+    }
+
+    public function testAFailedDraftUpdateIsRecordedAsAnError(): void
+    {
+        $this->mockHttp([new Response(400, [], '{"message":"A validation error occurred."}')]);
+        $plugin = $this->createPlugin();
+        $plugin->expects($this->once())
+            ->method('updateStatus')
+            ->with($this->anything(), PubObjectsExportPlugin::EXPORT_STATUS_ERROR);
+
+        $result = $this->invoke($plugin, 'createOrUpdateDraft', ['{}', $this->createSubmissionWithZenodoId('123'), self::RECORDS_URL, 'key', false, '123']);
+
+        $this->assertSame('plugins.importexport.zenodo.register.error.mdsError', $result[0][0]);
+        $this->assertStringContainsString('400 Bad Request', $result[0][1]);
+    }
+
+    public function testDraftFilesAreDeletedByKey(): void
+    {
+        $this->mockHttp([
+            $this->jsonResponse(200, ['entries' => [['key' => 'article.pdf'], ['key' => 'figure 1.png']]]),
+            new Response(204),
+            new Response(204),
+        ]);
+
+        $result = $this->invoke($this->createPlugin(), 'deleteDraftFiles', [$this->createSubmissionWithZenodoId('123'), self::RECORDS_URL, 'key', '123']);
+
+        $this->assertTrue($result);
+        $this->assertSame([
+            ['GET', '/api/records/123/draft/files'],
+            ['DELETE', '/api/records/123/draft/files/article.pdf'],
+            ['DELETE', '/api/records/123/draft/files/figure%201.png'],
+        ], $this->requestsMade());
+    }
+
+    public function testADraftWithoutFilesNeedsNoDeletion(): void
+    {
+        $this->mockHttp([$this->jsonResponse(200, ['entries' => []])]);
+
+        $result = $this->invoke($this->createPlugin(), 'deleteDraftFiles', [$this->createSubmissionWithZenodoId('123'), self::RECORDS_URL, 'key', '123']);
+
+        $this->assertTrue($result);
+        $this->assertCount(1, $this->history);
+    }
+
+    public function testAFailedFileDeletionIsRecordedAsAnError(): void
+    {
+        $this->mockHttp([$this->jsonResponse(200, ['entries' => [['key' => 'article.pdf']]]), new Response(500)]);
+        $plugin = $this->createPlugin();
+        $plugin->expects($this->once())->method('updateStatus')->with($this->anything(), PubObjectsExportPlugin::EXPORT_STATUS_ERROR);
+
+        $result = $this->invoke($plugin, 'deleteDraftFiles', [$this->createSubmissionWithZenodoId('123'), self::RECORDS_URL, 'key', '123']);
+
+        $this->assertSame('plugins.importexport.zenodo.api.error.fileDeleteError', $result[0][0]);
+    }
+
+    //
+    // isRecordPublished()
+    //
+    public function testAPublishedRecordIsReported(): void
+    {
+        $this->mockHttp([$this->jsonResponse(200, ['id' => '123', 'is_published' => true])]);
+
+        $this->assertTrue($this->createPlugin()->isRecordPublished($this->createSubmissionWithZenodoId('123'), '123', self::RECORDS_URL));
+        $this->assertSame([['GET', '/api/records/123']], $this->requestsMade());
+    }
+
+    public function testAnUnpublishedDraftIsNotPublished(): void
+    {
+        $this->mockHttp([new Response(404)]);
+
+        $this->assertFalse($this->createPlugin()->isRecordPublished($this->createSubmissionWithZenodoId('123'), '123', self::RECORDS_URL));
+    }
+
+    /**
+     * A record deleted in Zenodo answers with a tombstone, which the deposit treats
+     * as a record to replace rather than as a failure.
+     */
+    public function testADeletedRecordIsReportedAsDeleted(): void
+    {
+        $this->mockHttp([new Response(410, [], '{"status": 410, "message": "Record deleted", "tombstone": {"note": ""}}')]);
+        $plugin = $this->createPlugin();
+        $plugin->expects($this->never())->method('updateStatus');
+
+        $this->assertSame(
+            ZenodoExportPlugin::RECORD_DELETED,
+            $plugin->isRecordPublished($this->createSubmissionWithZenodoId('123'), '123', self::RECORDS_URL)
+        );
+    }
+
+    public function testAFailedPublishCheckIsAnError(): void
+    {
+        $this->mockHttp([new Response(500)]);
+        $plugin = $this->createPlugin();
+        $plugin->expects($this->once())->method('updateStatus')->with($this->anything(), PubObjectsExportPlugin::EXPORT_STATUS_ERROR);
+
+        $result = $plugin->isRecordPublished($this->createSubmissionWithZenodoId('123'), '123', self::RECORDS_URL);
+
+        $this->assertSame('plugins.importexport.zenodo.api.error.publishCheckError', $result[0][0]);
+    }
+
+    public function testForgettingARecordClearsItsIdAndRequest(): void
+    {
+        $submission = $this->createSubmissionWithZenodoId('123');
+        $submission->setData('zenodo::reviewRequestId', 'r1');
+
+        $this->createPlugin()->removeZenodoId($submission);
+
+        $this->assertNull($submission->getData('zenodo::id'));
+        $this->assertNull($submission->getData('zenodo::reviewRequestId'));
+    }
+
+    //
+    // Review requests
+    //
+    /**
+     * A request the plugin submitted is looked up by its stored id through the
+     * requests API, which is documented and answers reliably.
+     */
+    public function testAStoredReviewRequestIsLookedUpDirectly(): void
+    {
+        $this->mockHttp([$this->jsonResponse(200, ['id' => 'r1', 'status' => 'submitted', 'is_open' => true, 'is_closed' => false])]);
+        $submission = $this->createSubmissionWithZenodoId('123');
+        $submission->setData('zenodo::reviewRequestId', 'r1');
+
+        $this->assertSame(
+            ['id' => 'r1', 'status' => 'submitted', 'is_open' => true],
+            $this->createPlugin()->getReviewRequest($submission, '123', self::API_URL, 'key')
+        );
+        $this->assertSame([['GET', '/api/requests/r1']], $this->requestsMade());
+    }
+
+    /**
+     * Without a stored id the request is read from the draft's parent. Zenodo's own
+     * review endpoint is never used because it answers with a 500.
+     */
+    public function testAnUnstoredReviewRequestIsReadFromTheDraft(): void
+    {
+        $this->mockHttp([$this->jsonResponse(200, [
+            'id' => '123',
+            'parent' => ['review' => ['id' => 'r1', 'status' => 'submitted', 'is_open' => true, 'is_closed' => false]],
+        ])]);
+
+        $this->assertSame(
+            ['id' => 'r1', 'status' => 'submitted', 'is_open' => true],
+            $this->createPlugin()->getReviewRequest($this->createSubmissionWithZenodoId('123'), '123', self::API_URL, 'key')
+        );
+        $this->assertSame([['GET', '/api/records/123/draft']], $this->requestsMade());
+    }
+
+    public function testAClosedReviewRequestIsNotOpen(): void
+    {
+        $this->mockHttp([$this->jsonResponse(200, ['id' => 'r1', 'status' => 'declined', 'is_open' => false, 'is_closed' => true])]);
+        $submission = $this->createSubmissionWithZenodoId('123');
+        $submission->setData('zenodo::reviewRequestId', 'r1');
+
+        $review = $this->createPlugin()->getReviewRequest($submission, '123', self::API_URL, 'key');
+
+        $this->assertFalse($review['is_open']);
+    }
+
+    public function testADraftWithoutAReviewRequestReturnsNothing(): void
+    {
+        $this->mockHttp([$this->jsonResponse(200, ['id' => '123', 'parent' => ['id' => 'p1']])]);
+
+        $this->assertNull($this->createPlugin()->getReviewRequest($this->createSubmissionWithZenodoId('123'), '123', self::API_URL, 'key'));
+    }
+
+    /**
+     * Zenodo's refusal to replace an open request the plugin could not see is
+     * recognised, not recorded as a failed deposit.
+     */
+    public function testTheOpenReviewRefusalIsRecognised(): void
+    {
+        $this->mockHttp([new Response(400, [], '{"status": 400, "message": "An open review cannot be deleted."}')]);
+        $plugin = $this->createPlugin();
+        $plugin->expects($this->never())->method('updateStatus');
+
+        $this->assertSame(
+            ZenodoExportPlugin::REVIEW_OPEN,
+            $plugin->createReview($this->createSubmissionWithZenodoId('123'), '123', 'community', self::RECORDS_URL, 'key')
+        );
+    }
+
+    public function testAnyOtherReviewCreationFailureIsAnError(): void
+    {
+        $this->mockHttp([new Response(403, [], '{"message":"Permission denied."}')]);
+        $plugin = $this->createPlugin();
+        $plugin->expects($this->once())->method('updateStatus')->with($this->anything(), PubObjectsExportPlugin::EXPORT_STATUS_ERROR);
+
+        $result = $plugin->createReview($this->createSubmissionWithZenodoId('123'), '123', 'community', self::RECORDS_URL, 'key');
+
+        $this->assertSame('plugins.importexport.zenodo.api.error.createReviewError', $result[0][0]);
+    }
+
+    /**
+     * Zenodo refuses to replace or delete an open review request, so a failed check must
+     * stop the deposit rather than be taken as "no request" and lead to that refusal.
+     */
+    public function testAFailedReviewCheckIsReportedNotIgnored(): void
+    {
+        $this->mockHttp([new Response(500)]);
+        $plugin = $this->createPlugin();
+        $plugin->expects($this->once())->method('updateStatus')->with($this->anything(), PubObjectsExportPlugin::EXPORT_STATUS_ERROR);
+
+        $result = $plugin->getReviewRequest($this->createSubmissionWithZenodoId('123'), '123', self::API_URL, 'key');
+
+        $this->assertSame('plugins.importexport.zenodo.api.error.reviewCheckError', $result['error'][0]);
+    }
+
+    public function testCancellingAReviewRequestPostsTheCancelAction(): void
+    {
+        $this->mockHttp([$this->jsonResponse(200, ['id' => 'r1', 'status' => 'cancelled'])]);
+
+        $this->assertTrue($this->createPlugin()->cancelReviewRequest('r1', 'https://sandbox.zenodo.org/api/', 'key'));
+        $this->assertSame([['POST', '/api/requests/r1/actions/cancel']], $this->requestsMade());
     }
 }

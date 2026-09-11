@@ -102,10 +102,7 @@ msgid "plugins.importexport.zenodo.api.error.fileError"
 msgstr "File deposit was not successful! The Zenodo API returned an error: '{$param}'."
 
 msgid "plugins.importexport.zenodo.api.error.fileDeleteError"
-msgstr "Deleting the file in Zenodo was not successful! The Zenodo API returned an error: '{$param}'."
-
-msgid "plugins.importexport.zenodo.api.error.recordDeleteError"
-msgstr "Deleting the draft record in Zenodo was not successful! The Zenodo API returned an error: '{$param}'."
+msgstr "Replacing the draft's files in Zenodo was not successful! The Zenodo API returned an error: '{$param}'."
 
 msgid "plugins.importexport.zenodo.api.error.awardError"
 msgstr "The award validation check was not successful! The Zenodo API returned an error: '{$param}'."
@@ -127,6 +124,9 @@ msgstr "Accepting the review request to the community was not successful! The Ze
 
 msgid "plugins.importexport.zenodo.api.error.reviewCancelError"
 msgstr "Cancelling the review request was not successful! The Zenodo API returned an error: '{$param}'."
+
+msgid "plugins.importexport.zenodo.api.error.openReviewNotAccepted"
+msgstr "The record was updated in Zenodo, but its community review request is already open and could not be accepted automatically. It will be published when the community accepts it in Zenodo."
 
 msgid "plugins.importexport.zenodo.api.error.reviewCheckError"
 msgstr "Checking for a review request was not successful! The Zenodo API returned an error: '{$param}'."
