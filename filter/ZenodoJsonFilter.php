@@ -5,7 +5,7 @@
  *
  * Copyright (c) 2025-2026 Simon Fraser University
  * Copyright (c) 2025-2026 John Willinsky
- * Distributed under the GNU GPL v3. For full terms see the file docs/COPYING.
+ * Distributed under the GNU GPL v3. For full terms see the file LICENSE.
  *
  * @class ZenodoJsonFilter
  *
@@ -39,7 +39,6 @@ use PKP\filter\FilterGroup;
 use PKP\galley\Galley;
 use PKP\i18n\LocaleConversion;
 use PKP\plugins\importexport\PKPImportExportFilter;
-use PKP\submission\PKPSubmission;
 
 class ZenodoJsonFilter extends PKPImportExportFilter
 {
@@ -170,6 +169,11 @@ class ZenodoJsonFilter extends PKPImportExportFilter
                 'until' => $embargoUntil->format('Y-m-d'),
             ];
         }
+
+        // Every record carries the article's galley files; metadata-only records are not deposited.
+        $article['files'] = [
+            'enabled' => true,
+        ];
 
         // Journal Metadata
         $journalData = $this->getJournalData($context, $publication, $issue);

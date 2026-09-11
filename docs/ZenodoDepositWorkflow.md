@@ -11,10 +11,10 @@ flowchart TD
     Start([Start Deposit of Selected Records]) --> CheckAPIKey{API Key<br/>Configured?}
 
     CheckAPIKey -->|No| ErrorNoKey[Return Error:<br/>No API Key]
-    CheckAPIKey -->|Yes| CheckDOI{Check DOI<br/>Setting}
+    CheckAPIKey -->|Yes| Preflight{Preflight:<br/>title, authors, date,<br/>PDF galley, DOI or<br/>Zenodo DOIs enabled?}
 
-    CheckDOI -->|Mint Zenodo DOI disabled<br/>& No DOI| ErrorNoDOI[Return Error:<br/>Record Missing DOI]
-    CheckDOI -->|Has DOI or<br/>Zenodo DOI enabled| CheckExisting{Existing<br/>Zenodo ID stored?}
+    Preflight -->|Missing| ErrorPreflight[Set Status: FAILED<br/>with the reason]
+    Preflight -->|Complete| CheckExisting{Existing<br/>Zenodo ID stored?}
 
     CheckExisting -->|Yes| CheckPublished{Is Record<br/>published in Zenodo?}
     CheckExisting -->|No| CreateDraft[Create New Draft]
@@ -61,14 +61,14 @@ flowchart TD
     AcceptReview --> Success
 
     ErrorNoKey --> End([End])
-    ErrorNoDOI --> End
+    ErrorPreflight --> End
     Success --> End
 
     style Start fill:#d4edda
     style Success fill:#d4edda
     style End fill:#d4edda
     style ErrorNoKey fill:#f8d7da
-    style ErrorNoDOI fill:#f8d7da
+    style ErrorPreflight fill:#f8d7da
     style PublishDraft fill:#fff3cd
     style AcceptReview fill:#fff3cd
 ```

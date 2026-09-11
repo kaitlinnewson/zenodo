@@ -5,7 +5,7 @@
  *
  * Copyright (c) 2025-2026 Simon Fraser University
  * Copyright (c) 2025-2026 John Willinsky
- * Distributed under the GNU GPL v3. For full terms see the file docs/COPYING.
+ * Distributed under the GNU GPL v3. For full terms see the file LICENSE.
  *
  * @class ZenodoInfoSender
  *
@@ -56,6 +56,7 @@ class ZenodoInfoSender extends ScheduledTask
 
     /**
      * @copydoc ScheduledTask::executeActions()
+     *
      * @throws Exception
      */
     public function executeActions(): bool
@@ -88,8 +89,9 @@ class ZenodoInfoSender extends ScheduledTask
      * Get all journals that meet the requirements to have
      * their articles automatically sent to Zenodo.
      *
-     * @return array<Journal>
      * @throws Exception
+     *
+     * @return array<Journal>
      */
     protected function getJournals(): array
     {
@@ -119,6 +121,7 @@ class ZenodoInfoSender extends ScheduledTask
      * Register articles or publications
      *
      * @param array<Submission|Publication> $objects
+     *
      * @throws Exception
      */
     protected function registerObjects(array $objects, string $filter, Journal $journal): void
@@ -137,6 +140,7 @@ class ZenodoInfoSender extends ScheduledTask
 
     /**
      * Add execution log entry
+     *
      * @throws Exception
      */
     protected function addLogEntry(array $errors): void

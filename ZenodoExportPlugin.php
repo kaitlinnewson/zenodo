@@ -5,7 +5,7 @@
  *
  * Copyright (c) 2025 Simon Fraser University
  * Copyright (c) 2025 John Willinsky
- * Distributed under the GNU GPL v3. For full terms see the file docs/COPYING.
+ * Distributed under the GNU GPL v3. For full terms see the file LICENSE.
  *
  * @class ZenodoExportPlugin
  *
@@ -33,6 +33,8 @@ use PKP\galley\Galley;
 use PKP\notification\Notification;
 use PKP\plugins\interfaces\HasTaskScheduler;
 use PKP\scheduledTask\PKPScheduler;
+use PKP\submission\Genre;
+use PKP\submission\GenreDAO;
 use PKP\submissionFile\SubmissionFile;
 use Throwable;
 
@@ -179,17 +181,15 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
             return [['plugins.importexport.zenodo.register.error.noApiKey']];
         }
 
-        if ($missingMetadata = $this->validateRequiredMetadata($object)) {
-            $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $this->convertErrorMessage($missingMetadata));
-            return [$missingMetadata];
+        $preflightError = $this->validateRequiredMetadata($object)
+            ?? $this->validateGalleys($object)
+            ?? $this->validateDoi($object, $context);
+        if ($preflightError) {
+            $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $this->convertErrorMessage($preflightError));
+            return [$preflightError];
         }
 
-        $mintDoi = $this->mintZenodoDois($context);
         $isPublication = $object instanceof Publication;
-        $doi = $isPublication ? $object->getDoi() : $object->getCurrentPublication()->getDoi();
-        if (!$mintDoi && !$doi) {
-            return [['plugins.importexport.zenodo.api.error.noDoi']];
-        }
 
         $zenodoApiUrl = ($this->isTestMode($context) ? self::ZENODO_API_URL_DEV : self::ZENODO_API_URL);
         $recordsApiUrl = $zenodoApiUrl . self::ZENODO_API_OPERATION;
@@ -655,7 +655,7 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
         $publication = $object instanceof Publication ? $object : $object->getCurrentPublication();
         $missing = [];
 
-        if (!$publication?->getLocalizedTitle($publication->getData('locale'))) {
+        if (!$publication?->getLocalizedData('title', $publication->getData('locale'))) {
             $missing[] = __('common.title');
         }
         if (collect($publication?->getData('authors') ?? [])->isEmpty()) {
@@ -670,6 +670,73 @@ class ZenodoExportPlugin extends PubObjectsExportPlugin implements HasTaskSchedu
         return empty($missing)
             ? null
             : ['plugins.importexport.zenodo.export.failure.missingMetadata', implode(', ', $missing)];
+    }
+
+    /**
+     * Zenodo records must carry the article's full text, so a publication without an
+     * article PDF is refused rather than deposited as a metadata-only record.
+     *
+     * @return ?array [message key] or null when an article PDF is present
+     */
+    public function validateGalleys(Submission|Publication $object): ?array
+    {
+        $publication = $object instanceof Publication ? $object : $object->getCurrentPublication();
+
+        return $publication && $this->getArticlePdfFile($publication)
+            ? null
+            : ['plugins.importexport.zenodo.export.failure.noPdfGalley'];
+    }
+
+    /**
+     * Find the article's full-text PDF among the galleys: a local galley in the
+     * publication's locale holding a PDF whose genre is a primary document, so
+     * supplementary and dependent files are not taken for the article.
+     */
+    public function getArticlePdfFile(Publication $publication): ?SubmissionFile
+    {
+        $genreDao = DAORegistry::getDAO('GenreDAO'); /** @var GenreDAO $genreDao */
+        $locale = $publication->getData('locale');
+
+        foreach ($publication->getData('galleys') ?? [] as $galley) { /** @var Galley $galley */
+            if ($galley->getData('urlRemote') || $galley->getData('locale') !== $locale) {
+                continue;
+            }
+
+            $submissionFileId = $galley->getData('submissionFileId');
+            $galleyFile = $submissionFileId ? Repo::submissionFile()->get($submissionFileId) : null;
+            if (!$galleyFile || $galleyFile->getData('mimetype') !== 'application/pdf') {
+                continue;
+            }
+
+            $genre = $genreDao->getById($galleyFile->getData('genreId'));
+            $isPrimaryDocument = $genre
+                && $genre->getCategory() == Genre::GENRE_CATEGORY_DOCUMENT
+                && !$genre->getSupplementary()
+                && !$genre->getDependent();
+
+            if ($isPrimaryDocument) {
+                return $galleyFile;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Unless Zenodo is allowed to mint DOIs, a record without a DOI in OJS is refused.
+     *
+     * @return ?array [message key] or null when a DOI is present or will be minted
+     */
+    public function validateDoi(Submission|Publication $object, Context $context): ?array
+    {
+        if ($this->mintZenodoDois($context)) {
+            return null;
+        }
+
+        $publication = $object instanceof Publication ? $object : $object->getCurrentPublication();
+        return $publication?->getDoi()
+            ? null
+            : ['plugins.importexport.zenodo.api.error.noDoi'];
     }
 
     /**

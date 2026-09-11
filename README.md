@@ -32,9 +32,12 @@ of a record to deposit in Zenodo.
 
 ### Required Metadata
 
-Zenodo requires a title, at least one author and a publication date. A record missing any of these is
-not sent; it is marked as failed with a message naming the missing fields. The journal's publisher and
-ISSN are included in every record, and the plugin page shows a reminder when either is not set.
+Zenodo requires a title, at least one author and a publication date, and the plugin requires an article
+PDF so that every record carries the full text: a PDF galley in the article's language whose file type is
+the article text (not a supplementary or dependent file). A record missing any of these is not sent; it is
+marked as failed with a message naming what is missing. Metadata-only records are never created. The
+journal's publisher and ISSN are included in every record, and the plugin page shows a reminder when
+either is not set.
 
 ### DOIs
 
@@ -69,6 +72,16 @@ If a community is enabled in the plugin settings, the plugin will attempt to sub
 Zenodo. Depending on the community settings, the record may be published immediately or may be published after
 review. If the community submission fails for any reason, such as insufficient permissions or an API error,
 the record will still be exported to Zenodo and the status and identifier will be saved.
+
+## Tests
+
+Unit tests live in `tests/` and a Cypress functional test in `cypress/tests/functional/`. Both run in
+the GitHub workflow through `.github/actions/tests.sh`. To run them from the OJS root:
+
+```bash
+php lib/pkp/lib/vendor/bin/phpunit --configuration lib/pkp/tests/phpunit.xml plugins/generic/zenodo/tests
+npx cypress run --config '{"specPattern":["plugins/generic/zenodo/cypress/tests/functional/*.cy.js"]}'
+```
 
 ## License
 
